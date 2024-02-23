@@ -1,0 +1,67 @@
+const got = require('@/utils/got');
+const cheerio = require('cheerio');
+const { parseDate } = require('@/utils/parse-date');
+const timezone = require('@/utils/timezone');
+
+const baseUrl = 'https://www.mee.gov.cn/';
+const columns = {
+    zyygwj: { name: '中央有关文件', order: 1 },
+    gwywj: { name: '国务院有关文件', order: 2 },
+    bwj: { name: '部文件', order: 3 },
+    bgtwj: { name: '办公厅文件', order: 4 },
+    xzspwj: { name: '行政审批文件', order: 5 },
+};
+
+module.exports = async (ctx) => {
+    const cate = ctx.params.category ?? 'zyygwj';
+    const url = `${baseUrl}zcwj/`;
+    const title = `${columns[cate].name} - 政策文件 - 中华人民共和国生态环境部`;
+    const response = await got(url);
+    const $ = cheerio.load(response.data);
+    const all = $('.bd');
+    const list = all
+        .find(`div:nth-child(${columns[cate].order})`)
+*        .find('.mobile_none li')
+        .map((_, item) => {
+            const title = $(item).find('a.skipAutoFix').text().trim();
+            const href = $(item).find('a').attr('href');
+
+            let absolute_path;
+            if (href.search('\\./') === 0) {
+                absolute_path = `${url}${href.slice(2)}`;
+            } else if (href.search('\\./') === 1) {
+                absolute_path = `${baseUrl}${href.slice(3)}`;
+            } else {
+                absolute_path = href;
+            }
+            const link = absolute_path;
+            return {
+                title,
+                link,
+            };
+        })
+        .get();
+
+    const items = await Promise.all(
+        list.map((item) =>
+            ctx.cache.tryGet(item.link, async () => {
+                const detailResponse = await got(item.link);
+                const content = cheerio.load(detailResponse.data);
+                try {
+                    item.pubDate = timezone(parseDate(content('meta[name=PubDate]').attr('content')), +8);
+
+                    item.description = content('.neiright_JPZ_GK_CP').html();
+                } catch {
+                    item.description = '';
+                }
+                return item;
+            })
+        )
+    );
+
+    ctx.state.data = {
+        title,
+        link: url,
+        item: items,
+    };
+};
